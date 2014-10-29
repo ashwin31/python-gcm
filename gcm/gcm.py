@@ -13,7 +13,6 @@ class GCMMalformedJsonException(GCMException): pass
 class GCMConnectionException(GCMException): pass
 class GCMAuthenticationException(GCMException): pass
 class GCMTooManyRegIdsException(GCMException): pass
-class GCMNoCollapseKeyException(GCMException): pass
 class GCMInvalidTtlException(GCMException): pass
 
 # Exceptions from Google responses
@@ -48,6 +47,25 @@ def group_response(response, registration_ids, key):
     return grouping
 
 
+def urlencode_utf8(params):
+    """
+    UTF-8 safe variant of urllib.urlencode.
+    http://stackoverflow.com/a/8152242
+    """
+
+    if hasattr(params, 'items'):
+        params = params.items()
+
+    params =  (
+        '='.join((
+            urllib.quote_plus(k.encode('utf8'), safe='/'),
+            urllib.quote_plus(v.encode('utf8'), safe='/')
+        )) for k, v in params
+    )
+
+    return '&'.join(params)
+
+
 class GCM(object):
 
     # Timeunit is milliseconds.
@@ -72,7 +90,7 @@ class GCM(object):
 
 
     def construct_payload(self, registration_ids, data=None, collapse_key=None,
-                            delay_while_idle=False, time_to_live=None, is_json=True):
+                            delay_while_idle=False, time_to_live=None, is_json=True, dry_run=False):
         """
         Construct the dictionary mapping of parameters.
         Encodes the dictionary into JSON if for json requests.
@@ -80,7 +98,6 @@ class GCM(object):
 
         :return constructed dict or JSON payload
         :raises GCMInvalidTtlException: if time_to_live is invalid
-        :raises GCMNoCollapseKeyException: if collapse_key is missing when time_to_live is used
         """
 
         if time_to_live:
@@ -102,13 +119,14 @@ class GCM(object):
         if delay_while_idle:
             payload['delay_while_idle'] = delay_while_idle
 
-        if time_to_live:
+        if time_to_live >= 0:
             payload['time_to_live'] = time_to_live
-            if collapse_key is None:
-                raise GCMNoCollapseKeyException("collapse_key is required when time_to_live is provided")
 
         if collapse_key:
             payload['collapse_key'] = collapse_key
+
+        if dry_run:
+            payload['dry_run'] = True
 
         if is_json:
             payload = json.dumps(payload)
@@ -133,7 +151,7 @@ class GCM(object):
             headers['Content-Type'] = 'application/json'
 
         if not is_json:
-            data = urllib.urlencode(data)
+            data = urlencode_utf8(data)
         req = urllib2.Request(self.url, data, headers)
 
         try:
@@ -200,7 +218,7 @@ class GCM(object):
         return []
 
     def plaintext_request(self, registration_id, data=None, collapse_key=None,
-                            delay_while_idle=False, time_to_live=None, retries=5):
+                            delay_while_idle=False, time_to_live=None, retries=5, dry_run=False):
         """
         Makes a plaintext request to GCM servers
 
@@ -215,7 +233,7 @@ class GCM(object):
 
         payload = self.construct_payload(
             registration_id, data, collapse_key,
-            delay_while_idle, time_to_live, False
+            delay_while_idle, time_to_live, False, dry_run
         )
 
         attempt = 0
@@ -233,14 +251,15 @@ class GCM(object):
         raise IOError("Could not make request after %d attempts" % attempt)
 
     def json_request(self, registration_ids, data=None, collapse_key=None,
-                        delay_while_idle=False, time_to_live=None, retries=5):
+                        delay_while_idle=False, time_to_live=None, retries=5, dry_run=False):
         """
         Makes a JSON request to GCM servers
 
         :param registration_ids: list of the registration ids
         :param data: dict mapping of key-value pairs of messages
         :return dict of response body from Google including multicast_id, success, failure, canonical_ids, etc
-        :raises GCMMissingRegistrationException: if the list of registration_ids exceeds 1000 items
+        :raises GCMMissingRegistrationException: if the list of registration_ids is empty
+        :raises GCMTooManyRegIdsException: if the list of registration_ids exceeds 1000 items
         """
 
         if not registration_ids:
@@ -253,7 +272,7 @@ class GCM(object):
         for attempt in range(retries):
             payload = self.construct_payload(
                 registration_ids, data, collapse_key,
-                delay_while_idle, time_to_live
+                delay_while_idle, time_to_live, True, dry_run
             )
             response = self.make_request(payload, is_json=True)
             info = self.handle_json_response(response, registration_ids)
